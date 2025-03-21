@@ -40,17 +40,28 @@ resource "aws_security_group" "ms-cluster" {
   }
 }
 
-# Разделяем ingress и egress правила (Terraform best practice)
-resource "aws_security_group_rule" "ms-cluster-ingress" {
+# Входящий трафик от всех
+resource "aws_security_group_rule" "ms-cluster-ingress-all" {
   type              = "ingress"
   security_group_id = aws_security_group.ms-cluster.id
-  description       = "Inbound traffic from within the security group"
+  description       = "Allow inbound traffic from anywhere"
   from_port         = 0
   to_port           = 0
   protocol         = "-1"
   cidr_blocks       = ["0.0.0.0/0"]
+}
+
+# Входящий трафик от самого security group
+resource "aws_security_group_rule" "ms-cluster-ingress-self" {
+  type              = "ingress"
+  security_group_id = aws_security_group.ms-cluster.id
+  description       = "Allow inbound traffic from itself"
+  from_port         = 0
+  to_port           = 0
+  protocol         = "-1"
   self              = true
 }
+
 
 resource "aws_security_group_rule" "ms-cluster-egress" {
   type              = "egress"
@@ -133,14 +144,36 @@ resource "aws_eks_node_group" "ms-node-group" {
 
 # kubeconfig для доступа к кластеру
 resource "local_file" "kubeconfig" {
-  content = templatefile("${path.module}/templates/kubeconfig.tmpl", {
-    cluster_name    = aws_eks_cluster.ms-up-running.name
-    cluster_arn     = aws_eks_cluster.ms-up-running.arn
-    cluster_ca_data = aws_eks_cluster.ms-up-running.certificate_authority[0].data
-    cluster_endpoint = aws_eks_cluster.ms-up-running.endpoint
-  })
-  filename = "${path.module}/kubeconfig"
+  content = <<-EOT
+apiVersion: v1
+clusters:
+- cluster:
+    certificate-authority-data: ${aws_eks_cluster.ms-up-running.certificate_authority[0].data}
+    server: ${aws_eks_cluster.ms-up-running.endpoint}
+  name: ${aws_eks_cluster.ms-up-running.arn}
+contexts:
+- context:
+    cluster: ${aws_eks_cluster.ms-up-running.arn}
+    user: ${aws_eks_cluster.ms-up-running.arn}
+  name: ${aws_eks_cluster.ms-up-running.arn}
+current-context: ${aws_eks_cluster.ms-up-running.arn}
+kind: Config
+preferences: {}
+users:
+- name: ${aws_eks_cluster.ms-up-running.arn}
+  user:
+    exec:
+      apiVersion: client.authentication.k8s.io/v1beta1
+      command: aws
+      args:
+        - "eks"
+        - "get-token"
+        - "--cluster-name"
+        - "${aws_eks_cluster.ms-up-running.name}"
+EOT
+  filename = "kubeconfig"
 }
+
 
 /*
 #  Use data to ensure that the cluster is up before we start using it
