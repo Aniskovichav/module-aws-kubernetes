@@ -9,27 +9,20 @@ locals {
 }
 
 # EKS Cluster Resources
-#  * IAM Role to allow EKS service to manage other AWS services
-#  * EC2 Security Group to allow networking traffic with EKS cluster
-#  * EKS Cluster
-
+# IAM Role для управления EKS
 resource "aws_iam_role" "ms-cluster" {
   name = local.cluster_name
 
-  assume_role_policy = <<POLICY
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    {
-      "Effect": "Allow",
-      "Principal": {
-        "Service": "eks.amazonaws.com"
-      },
-      "Action": "sts:AssumeRole"
-    }
-  ]
-}
-POLICY
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect = "Allow"
+      Principal = {
+        Service = "eks.amazonaws.com"
+      }
+      Action = "sts:AssumeRole"
+    }]
+  })
 }
 
 resource "aws_iam_role_policy_attachment" "ms-cluster-AmazonEKSClusterPolicy" {
@@ -37,37 +30,38 @@ resource "aws_iam_role_policy_attachment" "ms-cluster-AmazonEKSClusterPolicy" {
   role       = aws_iam_role.ms-cluster.name
 }
 
-# политика безопасности сети
-
+# Security Group
 resource "aws_security_group" "ms-cluster" {
   name        = local.cluster_name
   description = "Cluster communication with worker nodes"
   vpc_id      = var.vpc_id
-
-  ingress {
-    description = "Inbound traffic from within the security group"
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
-    self        = true
-  }
-
-  egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
-    self        = true
-  }
-
   tags = {
     Name = "ms-up-running"
   }
 }
 
-# определение кластера
+# Разделяем ingress и egress правила (Terraform best practice)
+resource "aws_security_group_rule" "ms-cluster-ingress" {
+  type              = "ingress"
+  security_group_id = aws_security_group.ms-cluster.id
+  description       = "Inbound traffic from within the security group"
+  from_port         = 0
+  to_port           = 0
+  protocol         = "-1"
+  cidr_blocks       = ["0.0.0.0/0"]
+  self              = true
+}
 
+resource "aws_security_group_rule" "ms-cluster-egress" {
+  type              = "egress"
+  security_group_id = aws_security_group.ms-cluster.id
+  from_port         = 0
+  to_port           = 0
+  protocol         = "-1"
+  cidr_blocks       = ["0.0.0.0/0"]
+}
+
+# EKS Cluster
 resource "aws_eks_cluster" "ms-up-running" {
   name     = local.cluster_name
   role_arn = aws_iam_role.ms-cluster.arn
@@ -82,35 +76,23 @@ resource "aws_eks_cluster" "ms-up-running" {
   ]
 }
 
-# группа узлов IAM
-# Роль узла
-#
-
-# EKS Worker Nodes Resources
-#  * IAM role allowing Kubernetes actions to access other AWS services
-#  * EKS Node Group to launch worker nodes
-#
-
+# IAM Role для узлов
 resource "aws_iam_role" "ms-node" {
-  name = "${local.cluster_name}.node"
+  name = "${local.cluster_name}-node"
 
-  assume_role_policy = <<POLICY
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    {
-      "Effect": "Allow",
-      "Principal": {
-        "Service": "ec2.amazonaws.com"
-      },
-      "Action": "sts:AssumeRole"
-    }
-  ]
-}
-POLICY
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect = "Allow"
+      Principal = {
+        Service = "ec2.amazonaws.com"
+      }
+      Action = "sts:AssumeRole"
+    }]
+  })
 }
 
-# Политика узла
+# Прикрепляем политики для узлов
 resource "aws_iam_role_policy_attachment" "ms-node-AmazonEKSWorkerNodePolicy" {
   policy_arn = "arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy"
   role       = aws_iam_role.ms-node.name
@@ -126,8 +108,7 @@ resource "aws_iam_role_policy_attachment" "ms-node-AmazonEC2ContainerRegistryRea
   role       = aws_iam_role.ms-node.name
 }
 
-# группа узлов
-
+# Группа узлов
 resource "aws_eks_node_group" "ms-node-group" {
   cluster_name    = aws_eks_cluster.ms-up-running.name
   node_group_name = "microservices"
@@ -141,7 +122,7 @@ resource "aws_eks_node_group" "ms-node-group" {
   }
 
   disk_size      = var.nodegroup_disk_size
-  instance_types = var.nodegroup_instance_types
+  instance_types = tolist(var.nodegroup_instance_types) # Убедимся, что это список
 
   depends_on = [
     aws_iam_role_policy_attachment.ms-node-AmazonEKSWorkerNodePolicy,
@@ -150,36 +131,17 @@ resource "aws_eks_node_group" "ms-node-group" {
   ]
 }
 
-# Create a kubeconfig file based on the cluster that has been created
+# kubeconfig для доступа к кластеру
 resource "local_file" "kubeconfig" {
-  content  = <<KUBECONFIG
-apiVersion: v1
-clusters:
-- cluster:
-    certificate-authority-data: ${aws_eks_cluster.ms-up-running.certificate_authority.0.data}
-    server: ${aws_eks_cluster.ms-up-running.endpoint}
-  name: ${aws_eks_cluster.ms-up-running.arn}
-contexts:
-- context:
-    cluster: ${aws_eks_cluster.ms-up-running.arn}
-    user: ${aws_eks_cluster.ms-up-running.arn}
-  name: ${aws_eks_cluster.ms-up-running.arn}
-current-context: ${aws_eks_cluster.ms-up-running.arn}
-kind: Config
-preferences: {}
-users:
-- name: ${aws_eks_cluster.ms-up-running.arn}
-  user:
-    exec:
-      apiVersion: client.authentication.k8s.io/v1alpha1
-      command: aws-iam-authenticator
-      args:
-        - "token"
-        - "-i"
-        - "${aws_eks_cluster.ms-up-running.name}"
-    KUBECONFIG
-  filename = "kubeconfig"
+  content = templatefile("${path.module}/templates/kubeconfig.tmpl", {
+    cluster_name    = aws_eks_cluster.ms-up-running.name
+    cluster_arn     = aws_eks_cluster.ms-up-running.arn
+    cluster_ca_data = aws_eks_cluster.ms-up-running.certificate_authority[0].data
+    cluster_endpoint = aws_eks_cluster.ms-up-running.endpoint
+  })
+  filename = "${path.module}/kubeconfig"
 }
+
 /*
 #  Use data to ensure that the cluster is up before we start using it
 data "aws_eks_cluster" "msur" {
